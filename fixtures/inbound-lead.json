@@ -1,0 +1,14 @@
+{
+  "externalId": "lead_450k_demo",
+  "firstName": "Alex",
+  "lastName": "Rivera",
+  "phone": "(415) 555-0100",
+  "sourceTag": "facebook-lead",
+  "customFields": {
+    "loanAmount": "$450,000",
+    "purpose": "purchase",
+    "timeline": "45 days",
+    "creditBand": "good",
+    "meeting": { "booked": true, "startsAt": "2026-09-04T16:00:00Z" }
+  }
+}
