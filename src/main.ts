@@ -10,7 +10,11 @@ import { MappingFailureFilter } from "./http/mapping.filter";
 config();
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  if (process.env.NODE_ENV === "production" && !process.env.WEBHOOK_SECRET?.trim()) {
+    throw new Error("WEBHOOK_SECRET must be set in production; unsigned leads would be accepted");
+  }
+  // rawBody: the webhook signature is checked over the exact bytes received.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true });
   app.useGlobalFilters(new MappingFailureFilter());
   const origin = process.env.CORS_ORIGIN?.trim();
   app.enableCors({ origin: origin && origin.length > 0 ? origin : true });

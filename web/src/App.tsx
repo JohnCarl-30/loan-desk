@@ -370,7 +370,7 @@ function CallPage() {
 }
 
 function badgeClass(status: string): string {
-  if (status.includes("fail") || status === "mapping_failed") return "fail";
+  if (status.includes("fail") || status === "mapping_failed" || status === "rejected") return "fail";
   if (status.includes("posted") || status === "qualified" || status === "crm_local") return "ok";
   return "warn";
 }

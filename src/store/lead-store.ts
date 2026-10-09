@@ -138,6 +138,13 @@ export class LeadStore implements OnModuleDestroy {
     return row ? this.fromRow(row) : null;
   }
 
+  listByCrmStatus(status: CrmStatus): Lead[] {
+    const rows = this.db
+      .prepare("SELECT * FROM leads WHERE crm_status = ? ORDER BY updated_at ASC")
+      .all(status) as LeadRow[];
+    return rows.map((row) => this.fromRow(row));
+  }
+
   list(): Lead[] {
     const rows = this.db
       .prepare("SELECT * FROM leads ORDER BY created_at DESC")
