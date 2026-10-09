@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { Test } from "@nestjs/testing";
 import { INestApplication } from "@nestjs/common";
 import request from "supertest";
@@ -48,7 +49,7 @@ describe("CRM retry", () => {
   });
 
   afterEach(async () => {
-    fetchMock.mockRestore();
+    jest.restoreAllMocks();
     delete process.env.CRM_WEBHOOK_URL;
     if (app) await app.close();
   });
@@ -103,6 +104,96 @@ describe("CRM retry", () => {
     expect(store.findById(id)?.crmStatus).toBe("rejected");
     await crm.retryDue(LATER);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe("retry state on the lead API", () => {
+    async function detail(id: string) {
+      return (await request(app.getHttpServer()).get(`/api/leads/${id}`)).body;
+    }
+
+    test("a failed lead shows when the next attempt is due", async () => {
+      fetchMock.mockResolvedValueOnce(new Response("down", { status: 503 }));
+
+      const lead = await detail(await ingest());
+
+      expect(lead.crmNextRetryAt).toBe(new Date(Date.parse(lead.updatedAt) + 30_000).toISOString());
+      expect(lead.crmGaveUp).toBe(false);
+    });
+
+    test("a lead out of attempts shows it gave up and has no next attempt", async () => {
+      fetchMock.mockImplementation(async () => new Response("down", { status: 500 }));
+
+      const id = await ingest();
+      for (let i = 0; i < CRM_MAX_ATTEMPTS; i += 1) await crm.retryDue(LATER);
+      const lead = await detail(id);
+
+      expect(lead.crmNextRetryAt).toBeNull();
+      expect(lead.crmGaveUp).toBe(true);
+    });
+
+    test("a rejected lead has no next attempt and is not counted as given up", async () => {
+      fetchMock.mockResolvedValue(new Response("bad field", { status: 422 }));
+
+      const lead = await detail(await ingest());
+
+      expect(lead.crmNextRetryAt).toBeNull();
+      expect(lead.crmGaveUp).toBe(false);
+    });
+  });
+
+  describe("outbound signing", () => {
+    const SECRET = "test-crm-signing-secret";
+
+    afterEach(() => {
+      delete process.env.CRM_SIGNING_SECRET;
+    });
+
+    function sent(call: number): { headers: Record<string, string>; body: string } {
+      const init = fetchMock.mock.calls[call][1] as RequestInit;
+      return { headers: init.headers as Record<string, string>, body: init.body as string };
+    }
+
+    function hmac(timestamp: string, body: string): string {
+      return `sha256=${createHmac("sha256", SECRET).update(`${timestamp}.${body}`).digest("hex")}`;
+    }
+
+    test("signs the CRM POST over timestamp.body so the receiver can verify it", async () => {
+      process.env.CRM_SIGNING_SECRET = SECRET;
+      fetchMock.mockResolvedValueOnce(new Response("ok", { status: 200 }));
+      jest.spyOn(Date, "now").mockReturnValue(1_760_000_000_000);
+
+      await ingest();
+
+      const { headers, body } = sent(0);
+      expect(headers["X-LoanDesk-Timestamp"]).toBe("1760000000");
+      expect(headers["X-LoanDesk-Signature"]).toBe(hmac("1760000000", body));
+    });
+
+    test("a retry is signed with the time it is sent, not the first attempt's", async () => {
+      process.env.CRM_SIGNING_SECRET = SECRET;
+      fetchMock
+        .mockResolvedValueOnce(new Response("down", { status: 503 }))
+        .mockResolvedValueOnce(new Response("ok", { status: 200 }));
+      const now = jest.spyOn(Date, "now").mockReturnValue(1_760_000_000_000);
+
+      await ingest();
+      // Ten minutes later: a receiver with a 5-minute window rejects a reused timestamp.
+      now.mockReturnValue(1_760_000_600_000);
+      await crm.retryDue(LATER);
+
+      const { headers, body } = sent(1);
+      expect(headers["X-LoanDesk-Timestamp"]).toBe("1760000600");
+      expect(headers["X-LoanDesk-Signature"]).toBe(hmac("1760000600", body));
+    });
+
+    test("sends no signature headers when no secret is configured", async () => {
+      fetchMock.mockResolvedValueOnce(new Response("ok", { status: 200 }));
+
+      await ingest();
+
+      expect(sent(0).headers).not.toHaveProperty("X-LoanDesk-Signature");
+      expect(sent(0).headers).not.toHaveProperty("X-LoanDesk-Timestamp");
+    });
   });
 
   test("gives up after the attempt limit and leaves the lead failed", async () => {

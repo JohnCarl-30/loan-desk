@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { toCrmContact } from "../domain/qualify";
 import { nowIso } from "../domain/hash";
 import { redactPhone } from "../domain/phone";
+import { signPayload } from "../domain/signature";
 import type { Lead } from "../domain/types";
 import { LeadStore } from "../store/lead-store";
 
@@ -21,6 +22,21 @@ export function isRetryableStatus(status: number): boolean {
 /** Wait before attempt n+1, after n failed attempts: base, 2x, 4x, 8x. */
 export function retryDelayMs(attempts: number, baseMs: number): number {
   return baseMs * 2 ** Math.max(0, attempts - 1);
+}
+
+/**
+ * Same scheme as inbound, so n8n (or any receiver) can check the POST came from
+ * LoanDesk. Signed per attempt: a retry minutes later carries a fresh timestamp
+ * and still lands inside the receiver's replay window.
+ */
+function signingHeaders(body: string): Record<string, string> {
+  const secret = process.env.CRM_SIGNING_SECRET?.trim();
+  if (!secret) return {};
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  return {
+    "X-LoanDesk-Timestamp": timestamp,
+    "X-LoanDesk-Signature": signPayload(secret, timestamp, body),
+  };
 }
 
 @Injectable()
@@ -54,15 +70,29 @@ export class CrmService implements OnModuleInit, OnModuleDestroy {
    * contact.
    */
   async retryDue(nowMs: number = Date.now()): Promise<Lead[]> {
-    const baseMs = Number(process.env.CRM_RETRY_BASE_MS ?? 30_000);
     const retried: Lead[] = [];
     for (const lead of this.store.listByCrmStatus("failed")) {
-      if (lead.crmAttempts >= CRM_MAX_ATTEMPTS) continue;
-      const dueAt = Date.parse(lead.updatedAt) + retryDelayMs(lead.crmAttempts, baseMs);
-      if (dueAt > nowMs) continue;
+      const dueAt = this.nextRetryAtMs(lead);
+      if (dueAt === null || dueAt > nowMs) continue;
       retried.push(await this.postLead(lead));
     }
     return retried;
+  }
+
+  /** What the staff UI shows: when the sweep will post next, or that it stopped. */
+  retrySchedule(lead: Lead): { nextRetryAt: string | null; gaveUp: boolean } {
+    const dueAt = this.nextRetryAtMs(lead);
+    return {
+      nextRetryAt: dueAt === null ? null : new Date(dueAt).toISOString(),
+      gaveUp: lead.crmStatus === "failed" && lead.crmAttempts >= CRM_MAX_ATTEMPTS,
+    };
+  }
+
+  /** Null when the sweep will not touch this lead again. */
+  private nextRetryAtMs(lead: Lead): number | null {
+    if (lead.crmStatus !== "failed" || lead.crmAttempts >= CRM_MAX_ATTEMPTS) return null;
+    const baseMs = Number(process.env.CRM_RETRY_BASE_MS ?? 30_000);
+    return Date.parse(lead.updatedAt) + retryDelayMs(lead.crmAttempts, baseMs);
   }
 
   async postLead(lead: Lead): Promise<Lead> {
@@ -115,6 +145,7 @@ export class CrmService implements OnModuleInit, OnModuleDestroy {
         headers: {
           "content-type": "application/json",
           "Idempotency-Key": `loandesk-crm-${lead.id}`,
+          ...signingHeaders(body),
         },
         body,
       });

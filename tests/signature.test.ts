@@ -97,6 +97,37 @@ describe("POST /webhooks/lead with WEBHOOK_SECRET set", () => {
     expect(store.list()).toHaveLength(0);
   });
 
+  const voiceBody = JSON.stringify({
+    message: {
+      type: "end-of-call-report",
+      call: { id: "signed_call", customer: { number: "+14155550100" } },
+      analysis: {
+        structuredData: { fullName: "Alex Rivera", phone: "+14155550100", loanAmount: "$450,000", purpose: "purchase" },
+      },
+    },
+  });
+
+  function postVoice() {
+    return request(app.getHttpServer()).post("/webhooks/voice").set("content-type", "application/json");
+  }
+
+  test("rejects an unsigned voice call report with 401 and stores nothing", async () => {
+    const res = await postVoice().send(voiceBody);
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("SIGNATURE_MISSING");
+    expect(store.list()).toHaveLength(0);
+  });
+
+  test("accepts a correctly signed voice call report", async () => {
+    const ts = nowSeconds();
+    const res = await postVoice()
+      .set("X-LoanDesk-Timestamp", ts)
+      .set("X-LoanDesk-Signature", signPayload(SECRET, ts, voiceBody))
+      .send(voiceBody);
+    expect(res.status).toBe(200);
+    expect(res.body.loanAmountCents).toBe(45_000_000);
+  });
+
   test("rejects a replayed signature outside the 5-minute window", async () => {
     const ts = String(Math.floor(Date.now() / 1000) - 600);
     const res = await post()
