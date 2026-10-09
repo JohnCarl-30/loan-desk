@@ -11,7 +11,11 @@ export type LeadStatus =
   | "crm_failed"
   | "crm_local";
 
-export type CrmStatus = "pending" | "posted" | "failed" | "local_fallback" | "skipped";
+/**
+ * `failed` is retried on a backoff; `rejected` is a 4xx the CRM will keep
+ * returning, so only a person (the staff UI's retry button) sends it again.
+ */
+export type CrmStatus = "pending" | "posted" | "failed" | "rejected" | "local_fallback" | "skipped";
 
 export type Meeting = {
   booked: boolean;

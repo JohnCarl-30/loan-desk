@@ -2,7 +2,7 @@
 
 A mortgage-lead qualifying desk. An inbound lead comes in, an AI rep qualifies them, a meeting is booked, a CRM payload is posted, and a staff UI shows every mapping failure instead of swallowing it.
 
-This is a portfolio project, not a live system. It shows webhook ingestion that is safe to retry, money stored as integer cents, AI output treated as untrusted input, and failures that return 4xx instead of a silent 200. The mapping code you want is `src/domain/money.ts`, `src/domain/qualify.ts` (`toCrmContact`), and `src/webhooks/webhooks.service.ts`.
+This is a portfolio project, not a live system. It shows signed webhook ingestion that is safe to retry, outbound CRM posts that retry on a backoff, money stored as integer cents, AI output treated as untrusted input, and failures that return 4xx instead of a silent 200. The mapping code you want is `src/domain/money.ts`, `src/domain/qualify.ts` (`toCrmContact`), and `src/webhooks/webhooks.service.ts`.
 
 The API is NestJS. Modules are `webhooks`, `leads`, `qualifier`, and `crm`.
 
@@ -30,6 +30,27 @@ n8n, Pipedrive, Bonzo, or a homegrown CRM maps those names on their side. LoanDe
 
 Lead sources retry. A 500 followed by a replay must not create a second contact or post CRM twice with a mutated amount. `Idempotency-Key` (or `externalId`) plus a payload hash: same key and body returns the same lead. Same key and a different body is `409 IDEMPOTENCY_CONFLICT`. A mapping failure is stored as a red row and replayed as 4xx, never 200.
 
+## Why signatures
+
+Anyone who finds the URL can POST a lead. With `WEBHOOK_SECRET` set, `POST /webhooks/lead` needs two headers:
+
+- `X-LoanDesk-Timestamp`: Unix seconds.
+- `X-LoanDesk-Signature`: `sha256=` + hex HMAC-SHA256 of `{timestamp}.{raw body}` with the secret.
+
+The HMAC is over the bytes received, not re-serialized JSON. A missing, wrong, or older-than-5-minutes signature is `401` and nothing is stored. The check runs before idempotency, so a forged request cannot claim a key. `npm start` refuses to boot in production without the secret. Leave it empty locally and the curl demo below works unsigned.
+
+```bash
+TS=$(date +%s); BODY=$(cat fixtures/inbound-lead.json)
+SIG="sha256=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" -hex | awk '{print $NF}')"
+curl -sS -X POST http://127.0.0.1:8787/webhooks/lead -H 'content-type: application/json' \
+  -H 'Idempotency-Key: lead_450k_demo' -H "X-LoanDesk-Timestamp: $TS" -H "X-LoanDesk-Signature: $SIG" \
+  --data-binary "$BODY"
+```
+
+## Why outbound retries
+
+The CRM goes down too. A `5xx`, `408`, `429`, or network error marks the lead `failed`, and a sweep re-posts it after 30s, 1m, 2m, then 4m (5 attempts in total). Every attempt sends the same `Idempotency-Key: loandesk-crm-<lead id>`, so if the CRM got an earlier POST and only the response was lost, it can drop the repeat. Any other `4xx` is `rejected`: the CRM refused this body and will refuse it again, so it waits for a person. Both stay visible in the staff UI, which keeps its **Retry CRM post** button.
+
 ## Webhook contract
 
 `POST /webhooks/lead` accepts a messy JSON object. Nested `customFields`, money as a string, extra keys ignored. Identity is `externalId` or `id`. Phone must parse to US/Canada E.164. Bad mapping is 4xx with `{ error: { code, message, field } }`. Success is 200. Failure is never 200.
@@ -41,6 +62,7 @@ Lead sources retry. A 500 followed by a replay must not create a second contact 
 | Piece | State |
 | --- | --- |
 | Money parse, mapping, idempotency, 4xx | Real. Covered by `npm test`. |
+| Inbound signature check, outbound CRM retry | Real. Covered by `npm test`. |
 | Staff UI, SQLite, CRM outbox file | Real locally. |
 | `CRM_WEBHOOK_URL` | Real POST if you set it. Otherwise SQLite + `data/crm-outbox.jsonl`. |
 | Qualifier LLM | OpenAI if `OPENAI_API_KEY` is set. Fixture replies otherwise. Tests always use fixtures. |
@@ -104,7 +126,7 @@ docker build -t loandesk .
 docker run --rm -p 8787:8787 --env-file .env loandesk
 ```
 
-Set `CRM_WEBHOOK_URL` in the environment. Secrets stay in env. Do not bake keys into the image.
+Set `WEBHOOK_SECRET` (the container will not start without it) and `CRM_WEBHOOK_URL` in the environment. Secrets stay in env. Do not bake keys into the image.
 
 **Cloudflare Workers** is a later move (D1 instead of better-sqlite3). This repo ships a Node + NestJS server because SSE, SQLite, and `npm test` run without a Cloudflare account.
 
@@ -114,5 +136,8 @@ Set `CRM_WEBHOOK_URL` in the environment. Secrets stay in env. Do not bake keys 
 - No live Pipedrive or Bonzo connector. Outbound is one HTTP POST of our schema.
 - No live voice provider. Simulate-call is the demo. Plug Vapi/Retell into `POST /webhooks/voice` when you have a key.
 - Meeting "booked" is a field on the payload, not a Calendar API.
+- `POST /webhooks/voice` is not signed yet. Vapi and Retell each have their own scheme; add the provider's check when one is wired.
+- The CRM retry sweep is a timer in the API process. Run one instance, or move it to a queue before scaling out.
+- A lead that used up its retries stays `failed` in the UI. Nothing pages anyone yet.
 
 That is honest. The qualifying work is the mapping boundary, the cents type, and refusing to 200 on a bad `$450,000`.

@@ -1,5 +1,6 @@
-import { Body, Controller, Headers, HttpCode, Post, Res } from "@nestjs/common";
+import { Body, Controller, Headers, HttpCode, Post, Res, UseGuards } from "@nestjs/common";
 import type { Response } from "express";
+import { WebhookSignatureGuard } from "./signature.guard";
 import { WebhooksService } from "./webhooks.service";
 
 @Controller("webhooks")
@@ -7,6 +8,7 @@ export class WebhooksController {
   constructor(private readonly webhooks: WebhooksService) {}
 
   @Post("lead")
+  @UseGuards(WebhookSignatureGuard)
   async lead(
     @Body() body: unknown,
     @Headers() headers: Record<string, string | undefined>,

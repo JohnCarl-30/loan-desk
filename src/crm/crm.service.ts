@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { toCrmContact } from "../domain/qualify";
@@ -7,13 +7,76 @@ import { redactPhone } from "../domain/phone";
 import type { Lead } from "../domain/types";
 import { LeadStore } from "../store/lead-store";
 
+/** Total POSTs per lead, first attempt included, before it is left for a person. */
+export const CRM_MAX_ATTEMPTS = 5;
+
+/**
+ * 408 and 429 mean "later", 5xx means "not you". Any other 4xx is the CRM
+ * refusing this body, and sending the same body again cannot change that.
+ */
+export function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+/** Wait before attempt n+1, after n failed attempts: base, 2x, 4x, 8x. */
+export function retryDelayMs(attempts: number, baseMs: number): number {
+  return baseMs * 2 ** Math.max(0, attempts - 1);
+}
+
 @Injectable()
-export class CrmService {
+export class CrmService implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(CrmService.name);
+  private readonly inFlight = new Set<string>();
+  private timer: NodeJS.Timeout | null = null;
 
   constructor(private readonly store: LeadStore) {}
 
+  onModuleInit(): void {
+    const every = Number(process.env.CRM_RETRY_INTERVAL_MS ?? 15_000);
+    if (!(every > 0)) return;
+    this.timer = setInterval(() => {
+      void this.retryDue().catch((err: unknown) => {
+        this.log.error(`CRM retry sweep failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }, every);
+    this.timer.unref();
+  }
+
+  onModuleDestroy(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  /**
+   * Re-posts every `failed` lead whose backoff has elapsed. Safe to repeat:
+   * each POST carries the same Idempotency-Key, so a CRM that did receive an
+   * earlier attempt (and only the response was lost) will not create a second
+   * contact.
+   */
+  async retryDue(nowMs: number = Date.now()): Promise<Lead[]> {
+    const baseMs = Number(process.env.CRM_RETRY_BASE_MS ?? 30_000);
+    const retried: Lead[] = [];
+    for (const lead of this.store.listByCrmStatus("failed")) {
+      if (lead.crmAttempts >= CRM_MAX_ATTEMPTS) continue;
+      const dueAt = Date.parse(lead.updatedAt) + retryDelayMs(lead.crmAttempts, baseMs);
+      if (dueAt > nowMs) continue;
+      retried.push(await this.postLead(lead));
+    }
+    return retried;
+  }
+
   async postLead(lead: Lead): Promise<Lead> {
+    // The sweep and the staff retry button can reach the same lead at once.
+    if (this.inFlight.has(lead.id)) return this.store.findById(lead.id) ?? lead;
+    this.inFlight.add(lead.id);
+    try {
+      return await this.send(lead);
+    } finally {
+      this.inFlight.delete(lead.id);
+    }
+  }
+
+  private async send(lead: Lead): Promise<Lead> {
     if (!lead.fullName || !lead.phoneE164 || lead.loanAmountCents === null || !lead.purpose) {
       lead.crmStatus = "skipped";
       lead.updatedAt = nowIso();
@@ -58,9 +121,15 @@ export class CrmService {
       const text = await res.text();
       lead.crmResponse = text.slice(0, 4000);
       if (!res.ok) {
-        lead.crmStatus = "failed";
+        const retryable = isRetryableStatus(res.status);
+        lead.crmStatus = retryable ? "failed" : "rejected";
         lead.status = "crm_failed";
-        this.log.warn(`CRM ${res.status} lead=${lead.id}`);
+        const next = !retryable
+          ? "not retrying"
+          : lead.crmAttempts >= CRM_MAX_ATTEMPTS
+            ? "giving up"
+            : "will retry";
+        this.log.warn(`CRM ${res.status} lead=${lead.id} attempt=${lead.crmAttempts} ${next}`);
         return this.store.update(lead);
       }
       lead.crmStatus = "posted";
@@ -72,7 +141,7 @@ export class CrmService {
       lead.crmStatus = "failed";
       lead.status = "crm_failed";
       lead.crmResponse = message;
-      this.log.warn(`CRM network error lead=${lead.id}`);
+      this.log.warn(`CRM network error lead=${lead.id} attempt=${lead.crmAttempts}`);
       return this.store.update(lead);
     }
   }
