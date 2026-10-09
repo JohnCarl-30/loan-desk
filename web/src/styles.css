@@ -87,6 +87,8 @@ tr.fail.click:hover { background: #4a1c1f; }
 
 .code { font-family: var(--mono); font-size: 12px; color: var(--red); }
 .mono { font-family: var(--mono); font-size: 12px; }
+.nowrap { white-space: nowrap; }
+.card.wide { grid-column: 1 / -1; }
 .muted { color: var(--muted); }
 
 .grid {

@@ -53,6 +53,12 @@ The CRM goes down too. A `5xx`, `408`, `429`, or network error marks the lead `f
 
 With `CRM_SIGNING_SECRET` set, each CRM POST is signed the same way as inbound: `X-LoanDesk-Timestamp` and `X-LoanDesk-Signature` over `{timestamp}.{body}`. The receiver (an n8n Code node, for example) recomputes the HMAC and drops anything that doesn't match. Every attempt is signed when it is sent, so a retry minutes later still falls inside the receiver's 5-minute window. Use a different secret from `WEBHOOK_SECRET`: one is shared with lead sources, the other with the CRM side.
 
+## Delivery log
+
+A lead keeps every CRM attempt, not just the last response. Each row in `crm_deliveries` records the attempt number, what triggered it (`initial`, `auto_retry`, or `manual` for the staff button), when it started, how long it took, the status code (null when nothing came back), the outcome, the network error if there was one, and the first 4000 characters of the response. The lead page shows them as a timeline, so during an outage you can see when posts started failing, what the CRM said, and which retry got through. `GET /api/leads/:id` returns the same rows as `crmDeliveries`.
+
+Local outbox writes (no `CRM_WEBHOOK_URL`) are not HTTP deliveries and are not logged here.
+
 ## Webhook contract
 
 `POST /webhooks/lead` accepts a messy JSON object. Nested `customFields`, money as a string, extra keys ignored. Identity is `externalId` or `id`. Phone must parse to US/Canada E.164. Bad mapping is 4xx with `{ error: { code, message, field } }`. Success is 200. Failure is never 200.
