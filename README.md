@@ -2,7 +2,7 @@
 
 A mortgage-lead qualifying desk. An inbound lead comes in, an AI rep qualifies them, a meeting is booked, a CRM payload is posted, and a staff UI shows every mapping failure instead of swallowing it.
 
-This is the interview walkthrough. The mapping code you want is `src/domain/money.ts`, `src/domain/qualify.ts` (`toCrmContact`), and `src/webhooks/webhooks.service.ts`.
+This is a portfolio project, not a live system. It shows webhook ingestion that is safe to retry, money stored as integer cents, AI output treated as untrusted input, and failures that return 4xx instead of a silent 200. The mapping code you want is `src/domain/money.ts`, `src/domain/qualify.ts` (`toCrmContact`), and `src/webhooks/webhooks.service.ts`.
 
 The API is NestJS. Modules are `webhooks`, `leads`, `qualifier`, and `crm`.
 
@@ -47,7 +47,7 @@ Lead sources retry. A 500 followed by a replay must not create a second contact 
 | Voice | Browser simulate-call streams SSE. Live Twilio / A2P / Vapi is not in this repo. |
 | Pipedrive / Bonzo | Not live. Point `CRM_WEBHOOK_URL` at n8n (or any HTTP endpoint) and map LoanDesk's schema there. |
 
-This app is not deployed until you deploy it. Do not put a live URL in a resume until `wrangler` or the Docker image is actually running somewhere.
+This app is not deployed. There is no live URL.
 
 ## 5-minute demo
 
@@ -108,7 +108,7 @@ Set `CRM_WEBHOOK_URL` in the environment. Secrets stay in env. Do not bake keys 
 
 **Cloudflare Workers** is a later move (D1 instead of better-sqlite3). This repo ships a Node + NestJS server because SSE, SQLite, and `npm test` run without a Cloudflare account.
 
-## Gaps vs a voice-agent lending job
+## Known gaps
 
 - No Twilio and no A2P 10DLC. The voice webhook envelope is ready; the carrier is not.
 - No live Pipedrive or Bonzo connector. Outbound is one HTTP POST of our schema.
