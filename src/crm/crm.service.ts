@@ -5,11 +5,14 @@ import { toCrmContact } from "../domain/qualify";
 import { nowIso } from "../domain/hash";
 import { redactPhone } from "../domain/phone";
 import { signPayload } from "../domain/signature";
-import type { Lead } from "../domain/types";
+import type { CrmDelivery, CrmTrigger, Lead } from "../domain/types";
 import { LeadStore } from "../store/lead-store";
 
 /** Total POSTs per lead, first attempt included, before it is left for a person. */
 export const CRM_MAX_ATTEMPTS = 5;
+
+/** A CRM error page can be megabytes. The first 4000 characters say what went wrong. */
+const RESPONSE_BODY_LIMIT = 4000;
 
 /**
  * 408 and 429 mean "later", 5xx means "not you". Any other 4xx is the CRM
@@ -74,7 +77,7 @@ export class CrmService implements OnModuleInit, OnModuleDestroy {
     for (const lead of this.store.listByCrmStatus("failed")) {
       const dueAt = this.nextRetryAtMs(lead);
       if (dueAt === null || dueAt > nowMs) continue;
-      retried.push(await this.postLead(lead));
+      retried.push(await this.postLead(lead, "auto_retry"));
     }
     return retried;
   }
@@ -95,18 +98,18 @@ export class CrmService implements OnModuleInit, OnModuleDestroy {
     return Date.parse(lead.updatedAt) + retryDelayMs(lead.crmAttempts, baseMs);
   }
 
-  async postLead(lead: Lead): Promise<Lead> {
+  async postLead(lead: Lead, trigger: CrmTrigger = "initial"): Promise<Lead> {
     // The sweep and the staff retry button can reach the same lead at once.
     if (this.inFlight.has(lead.id)) return this.store.findById(lead.id) ?? lead;
     this.inFlight.add(lead.id);
     try {
-      return await this.send(lead);
+      return await this.send(lead, trigger);
     } finally {
       this.inFlight.delete(lead.id);
     }
   }
 
-  private async send(lead: Lead): Promise<Lead> {
+  private async send(lead: Lead, trigger: CrmTrigger): Promise<Lead> {
     if (!lead.fullName || !lead.phoneE164 || lead.loanAmountCents === null || !lead.purpose) {
       lead.crmStatus = "skipped";
       lead.updatedAt = nowIso();
@@ -139,6 +142,20 @@ export class CrmService implements OnModuleInit, OnModuleDestroy {
       return this.store.update(lead);
     }
 
+    const startedMs = Date.now();
+    let statusCode: number | null = null;
+    const record = (result: Pick<CrmDelivery, "outcome" | "error" | "responseBody">): void => {
+      this.store.insertDelivery({
+        leadId: lead.id,
+        attempt: lead.crmAttempts,
+        trigger,
+        startedAt: new Date(startedMs).toISOString(),
+        durationMs: Date.now() - startedMs,
+        statusCode,
+        ...result,
+      });
+    };
+
     try {
       const res = await fetch(url, {
         method: "POST",
@@ -149,12 +166,15 @@ export class CrmService implements OnModuleInit, OnModuleDestroy {
         },
         body,
       });
-      const text = await res.text();
-      lead.crmResponse = text.slice(0, 4000);
+      statusCode = res.status;
+      const text = (await res.text()).slice(0, RESPONSE_BODY_LIMIT);
+      lead.crmResponse = text;
       if (!res.ok) {
         const retryable = isRetryableStatus(res.status);
-        lead.crmStatus = retryable ? "failed" : "rejected";
+        const outcome = retryable ? "failed" : "rejected";
+        lead.crmStatus = outcome;
         lead.status = "crm_failed";
+        record({ outcome, error: null, responseBody: text });
         const next = !retryable
           ? "not retrying"
           : lead.crmAttempts >= CRM_MAX_ATTEMPTS
@@ -165,6 +185,7 @@ export class CrmService implements OnModuleInit, OnModuleDestroy {
       }
       lead.crmStatus = "posted";
       lead.status = "crm_posted";
+      record({ outcome: "posted", error: null, responseBody: text });
       this.log.log(`CRM posted lead=${lead.id}`);
       return this.store.update(lead);
     } catch (err) {
@@ -172,6 +193,7 @@ export class CrmService implements OnModuleInit, OnModuleDestroy {
       lead.crmStatus = "failed";
       lead.status = "crm_failed";
       lead.crmResponse = message;
+      record({ outcome: "failed", error: message, responseBody: null });
       this.log.warn(`CRM network error lead=${lead.id} attempt=${lead.crmAttempts}`);
       return this.store.update(lead);
     }

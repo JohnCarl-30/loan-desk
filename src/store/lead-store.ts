@@ -4,7 +4,15 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import type { Cents } from "../domain/money";
 import type { ErrorCode } from "../domain/errors";
-import { EMPTY_MEETING, type CrmStatus, type Lead, type LeadStatus, type Meeting, type Purpose } from "../domain/types";
+import {
+  EMPTY_MEETING,
+  type CrmDelivery,
+  type CrmStatus,
+  type Lead,
+  type LeadStatus,
+  type Meeting,
+  type Purpose,
+} from "../domain/types";
 
 type LeadRow = {
   id: string;
@@ -34,6 +42,18 @@ type LeadRow = {
   crm_attempts: number;
   created_at: string;
   updated_at: string;
+};
+
+type DeliveryRow = {
+  lead_id: string;
+  attempt: number;
+  trigger: CrmDelivery["trigger"];
+  started_at: string;
+  duration_ms: number;
+  status_code: number | null;
+  outcome: CrmDelivery["outcome"];
+  error: string | null;
+  response_body: string | null;
 };
 
 @Injectable()
@@ -81,6 +101,20 @@ export class LeadStore implements OnModuleDestroy {
       CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
       CREATE INDEX IF NOT EXISTS idx_leads_external ON leads(external_id);
       CREATE INDEX IF NOT EXISTS idx_leads_created ON leads(created_at);
+
+      CREATE TABLE IF NOT EXISTS crm_deliveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lead_id TEXT NOT NULL REFERENCES leads(id),
+        attempt INTEGER NOT NULL,
+        trigger TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        status_code INTEGER,
+        outcome TEXT NOT NULL,
+        error TEXT,
+        response_body TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_crm_deliveries_lead ON crm_deliveries(lead_id, id);
     `);
   }
 
@@ -150,6 +184,46 @@ export class LeadStore implements OnModuleDestroy {
       .prepare("SELECT * FROM leads ORDER BY created_at DESC")
       .all() as LeadRow[];
     return rows.map((row) => this.fromRow(row));
+  }
+
+  insertDelivery(delivery: CrmDelivery): void {
+    this.db
+      .prepare(
+        `INSERT INTO crm_deliveries (
+          lead_id, attempt, trigger, started_at, duration_ms, status_code, outcome, error, response_body
+        ) VALUES (
+          @lead_id, @attempt, @trigger, @started_at, @duration_ms, @status_code, @outcome, @error, @response_body
+        )`,
+      )
+      .run({
+        lead_id: delivery.leadId,
+        attempt: delivery.attempt,
+        trigger: delivery.trigger,
+        started_at: delivery.startedAt,
+        duration_ms: delivery.durationMs,
+        status_code: delivery.statusCode,
+        outcome: delivery.outcome,
+        error: delivery.error,
+        response_body: delivery.responseBody,
+      } satisfies DeliveryRow);
+  }
+
+  /** Oldest first, so the log reads as a timeline. */
+  listDeliveries(leadId: string): CrmDelivery[] {
+    const rows = this.db
+      .prepare("SELECT * FROM crm_deliveries WHERE lead_id = ? ORDER BY id ASC")
+      .all(leadId) as DeliveryRow[];
+    return rows.map((row) => ({
+      leadId: row.lead_id,
+      attempt: row.attempt,
+      trigger: row.trigger,
+      startedAt: row.started_at,
+      durationMs: row.duration_ms,
+      statusCode: row.status_code,
+      outcome: row.outcome,
+      error: row.error,
+      responseBody: row.response_body,
+    }));
   }
 
   private toRow(lead: Lead): LeadRow {

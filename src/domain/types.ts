@@ -17,6 +17,23 @@ export type LeadStatus =
  */
 export type CrmStatus = "pending" | "posted" | "failed" | "rejected" | "local_fallback" | "skipped";
 
+/** Who sent a CRM POST: ingest, the backoff sweep, or a person pressing retry. */
+export type CrmTrigger = "initial" | "auto_retry" | "manual";
+
+/** One HTTP attempt to the CRM. A lead keeps all of them, not just the last. */
+export type CrmDelivery = {
+  leadId: string;
+  attempt: number;
+  trigger: CrmTrigger;
+  startedAt: string;
+  durationMs: number;
+  /** Null when no response came back (DNS, refused, reset, timeout). */
+  statusCode: number | null;
+  outcome: Extract<CrmStatus, "posted" | "failed" | "rejected">;
+  error: string | null;
+  responseBody: string | null;
+};
+
 export type Meeting = {
   booked: boolean;
   startsAt: string | null;

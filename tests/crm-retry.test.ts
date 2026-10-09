@@ -106,6 +106,84 @@ describe("CRM retry", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  describe("delivery log", () => {
+    async function deliveries(id: string) {
+      return (await request(app.getHttpServer()).get(`/api/leads/${id}`)).body.crmDeliveries;
+    }
+
+    test("records every attempt in order, with what triggered it and what came back", async () => {
+      fetchMock
+        .mockResolvedValueOnce(new Response("down", { status: 503 }))
+        .mockResolvedValueOnce(new Response("ok", { status: 200 }));
+
+      const id = await ingest();
+      await crm.retryDue(LATER);
+      const log = await deliveries(id);
+
+      expect(log).toHaveLength(2);
+      expect(log[0]).toMatchObject({ attempt: 1, trigger: "initial", statusCode: 503, outcome: "failed", error: null, responseBody: "down" });
+      expect(log[1]).toMatchObject({ attempt: 2, trigger: "auto_retry", statusCode: 200, outcome: "posted", error: null, responseBody: "ok" });
+      for (const entry of log) {
+        expect(Number.isNaN(Date.parse(entry.startedAt))).toBe(false);
+        expect(entry.durationMs).toBeGreaterThanOrEqual(0);
+      }
+    });
+
+    test("records a network error with no status code", async () => {
+      fetchMock.mockRejectedValueOnce(new Error("ECONNRESET"));
+
+      const log = await deliveries(await ingest());
+
+      expect(log).toEqual([expect.objectContaining({ statusCode: null, outcome: "failed", error: "ECONNRESET", responseBody: null })]);
+    });
+
+    test("records a 4xx as rejected", async () => {
+      fetchMock.mockResolvedValueOnce(new Response("bad field", { status: 422 }));
+
+      const log = await deliveries(await ingest());
+
+      expect(log).toEqual([expect.objectContaining({ statusCode: 422, outcome: "rejected", responseBody: "bad field" })]);
+    });
+
+    test("records the staff retry button as a manual attempt", async () => {
+      fetchMock
+        .mockResolvedValueOnce(new Response("bad field", { status: 422 }))
+        .mockResolvedValueOnce(new Response("ok", { status: 200 }));
+
+      const id = await ingest();
+      await request(app.getHttpServer()).post(`/api/leads/${id}/crm-retry`).expect(201);
+      const log = await deliveries(id);
+
+      expect(log.map((e: { trigger: string; outcome: string }) => [e.trigger, e.outcome])).toEqual([
+        ["initial", "rejected"],
+        ["manual", "posted"],
+      ]);
+    });
+
+    test("keeps at most 4000 characters of a response body", async () => {
+      fetchMock.mockResolvedValueOnce(new Response("x".repeat(10_000), { status: 502 }));
+
+      const [entry] = await deliveries(await ingest());
+
+      expect(entry.responseBody).toHaveLength(4000);
+    });
+
+    test("keeps each lead's log separate", async () => {
+      fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
+
+      const first = await ingest();
+      const second = (
+        await request(app.getHttpServer())
+          .post("/webhooks/lead")
+          .set("Idempotency-Key", "crm_retry_2")
+          .send({ ...lead, externalId: "crm_retry_2" })
+      ).body.id as string;
+
+      expect(await deliveries(first)).toHaveLength(1);
+      expect(await deliveries(second)).toHaveLength(1);
+    });
+  });
+
   describe("retry state on the lead API", () => {
     async function detail(id: string) {
       return (await request(app.getHttpServer()).get(`/api/leads/${id}`)).body;

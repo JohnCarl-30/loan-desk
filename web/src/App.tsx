@@ -2,6 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Meeting = { booked: boolean; startsAt: string | null };
 
+type Delivery = {
+  attempt: number;
+  trigger: "initial" | "auto_retry" | "manual";
+  startedAt: string;
+  durationMs: number;
+  statusCode: number | null;
+  outcome: string;
+  error: string | null;
+  responseBody: string | null;
+};
+
 type LeadRow = {
   id: string;
   externalId: string;
@@ -32,6 +43,7 @@ type LeadRow = {
   rawPayload?: string | null;
   crmRequest?: string | null;
   crmResponse?: string | null;
+  crmDeliveries?: Delivery[];
 };
 
 type Page = "leads" | "call";
@@ -249,6 +261,10 @@ function LeadDetail({ id }: { id: string }) {
           <h2 style={{ marginTop: 16 }}>CRM response</h2>
           <pre>{lead.crmResponse ?? "—"}</pre>
         </div>
+        <div className="card wide">
+          <h2>CRM delivery log</h2>
+          <DeliveryLog deliveries={lead.crmDeliveries ?? []} />
+        </div>
         <div className="card">
           <h2>Transcript</h2>
           <pre>{lead.transcript ?? "—"}</pre>
@@ -259,6 +275,44 @@ function LeadDetail({ id }: { id: string }) {
         </div>
       </div>
     </>
+  );
+}
+
+const TRIGGER_LABEL: Record<Delivery["trigger"], string> = {
+  initial: "first try",
+  auto_retry: "auto retry",
+  manual: "staff retry",
+};
+
+function DeliveryLog({ deliveries }: { deliveries: Delivery[] }) {
+  if (deliveries.length === 0) return <div className="muted">No CRM POSTs yet.</div>;
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>When</th>
+          <th>Trigger</th>
+          <th>Result</th>
+          <th>Took</th>
+          <th>Response</th>
+        </tr>
+      </thead>
+      <tbody>
+        {deliveries.map((d) => (
+          <tr key={d.attempt} className={d.outcome === "posted" ? "" : "fail"}>
+            <td className="mono">{d.attempt}</td>
+            <td className="muted nowrap">{d.startedAt.slice(0, 19).replace("T", " ")}</td>
+            <td className="nowrap">{TRIGGER_LABEL[d.trigger]}</td>
+            <td>
+              <span className={`badge ${badgeClass(d.outcome)}`}>{d.statusCode ?? "no response"}</span>
+            </td>
+            <td className="mono nowrap">{d.durationMs} ms</td>
+            <td className={d.outcome === "posted" ? "mono" : "code"}>{d.error ?? d.responseBody?.slice(0, 120) ?? ""}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
