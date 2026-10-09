@@ -20,6 +20,7 @@ export class WebhooksController {
 
   @Post("voice")
   @HttpCode(200)
+  @UseGuards(WebhookSignatureGuard)
   async voice(
     @Body() body: unknown,
     @Headers() headers: Record<string, string | undefined>,

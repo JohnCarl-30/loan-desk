@@ -23,6 +23,8 @@ type LeadRow = {
   droppedFields: string[];
   crmStatus: string | null;
   crmAttempts: number;
+  crmNextRetryAt: string | null;
+  crmGaveUp: boolean;
   createdAt: string;
   updatedAt: string;
   transcript?: string | null;
@@ -141,7 +143,8 @@ function LeadList() {
                 <td className="mono">{lead.loanAmountUsd ?? "—"}</td>
                 <td className="code">{lead.errorCode ?? ""}</td>
                 <td>
-                  <span className={`badge ${badgeClass(lead.crmStatus ?? "")}`}>{lead.crmStatus ?? "—"}</span>
+                  <span className={`badge ${badgeClass(lead.crmStatus ?? "")}`}>{crmLabel(lead)}</span>
+                  {lead.crmNextRetryAt ? <div className="muted">retry {clock(lead.crmNextRetryAt)}</div> : null}
                 </td>
                 <td className="muted">{lead.createdAt.slice(0, 19).replace("T", " ")}</td>
               </tr>
@@ -232,10 +235,15 @@ function LeadDetail({ id }: { id: string }) {
           <h2>CRM</h2>
           <dl className="dl">
             <dt>Status</dt>
-            <dd>{lead.crmStatus}</dd>
+            <dd>{crmLabel(lead)}</dd>
             <dt>Attempts</dt>
             <dd>{lead.crmAttempts}</dd>
+            <dt>Next retry</dt>
+            <dd>{lead.crmNextRetryAt ? clock(lead.crmNextRetryAt) : "—"}</dd>
           </dl>
+          {lead.crmGaveUp ? (
+            <div className="err-banner">Automatic retries stopped. Check the CRM, then use Retry CRM post.</div>
+          ) : null}
           <h2 style={{ marginTop: 16 }}>CRM request</h2>
           <pre>{pretty(lead.crmRequest)}</pre>
           <h2 style={{ marginTop: 16 }}>CRM response</h2>
@@ -373,6 +381,15 @@ function badgeClass(status: string): string {
   if (status.includes("fail") || status === "mapping_failed" || status === "rejected") return "fail";
   if (status.includes("posted") || status === "qualified" || status === "crm_local") return "ok";
   return "warn";
+}
+
+/** "gave up" reads better than "failed" once the sweep has stopped trying. */
+function crmLabel(lead: LeadRow): string {
+  return lead.crmGaveUp ? "gave up" : (lead.crmStatus ?? "—");
+}
+
+function clock(iso: string): string {
+  return new Date(iso).toLocaleTimeString();
 }
 
 function pretty(raw: string | null | undefined): string {

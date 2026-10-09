@@ -6,3 +6,4 @@ data/*.sqlite-journal
 data/crm-outbox.jsonl
 *.log
 .DS_Store
+*.tsbuildinfo

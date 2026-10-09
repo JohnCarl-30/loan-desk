@@ -32,7 +32,7 @@ Lead sources retry. A 500 followed by a replay must not create a second contact 
 
 ## Why signatures
 
-Anyone who finds the URL can POST a lead. With `WEBHOOK_SECRET` set, `POST /webhooks/lead` needs two headers:
+Anyone who finds the URL can POST a lead. With `WEBHOOK_SECRET` set, `POST /webhooks/lead` and `POST /webhooks/voice` need two headers:
 
 - `X-LoanDesk-Timestamp`: Unix seconds.
 - `X-LoanDesk-Signature`: `sha256=` + hex HMAC-SHA256 of `{timestamp}.{raw body}` with the secret.
@@ -49,7 +49,9 @@ curl -sS -X POST http://127.0.0.1:8787/webhooks/lead -H 'content-type: applicati
 
 ## Why outbound retries
 
-The CRM goes down too. A `5xx`, `408`, `429`, or network error marks the lead `failed`, and a sweep re-posts it after 30s, 1m, 2m, then 4m (5 attempts in total). Every attempt sends the same `Idempotency-Key: loandesk-crm-<lead id>`, so if the CRM got an earlier POST and only the response was lost, it can drop the repeat. Any other `4xx` is `rejected`: the CRM refused this body and will refuse it again, so it waits for a person. Both stay visible in the staff UI, which keeps its **Retry CRM post** button.
+The CRM goes down too. A `5xx`, `408`, `429`, or network error marks the lead `failed`, and a sweep re-posts it after 30s, 1m, 2m, then 4m (5 attempts in total). Every attempt sends the same `Idempotency-Key: loandesk-crm-<lead id>`, so if the CRM got an earlier POST and only the response was lost, it can drop the repeat. Any other `4xx` is `rejected`: the CRM refused this body and will refuse it again, so it waits for a person. Both stay visible in the staff UI, which shows when the next attempt is due, marks a lead **gave up** once its attempts run out, and keeps its **Retry CRM post** button.
+
+With `CRM_SIGNING_SECRET` set, each CRM POST is signed the same way as inbound: `X-LoanDesk-Timestamp` and `X-LoanDesk-Signature` over `{timestamp}.{body}`. The receiver (an n8n Code node, for example) recomputes the HMAC and drops anything that doesn't match. Every attempt is signed when it is sent, so a retry minutes later still falls inside the receiver's 5-minute window. Use a different secret from `WEBHOOK_SECRET`: one is shared with lead sources, the other with the CRM side.
 
 ## Webhook contract
 
@@ -136,8 +138,8 @@ Set `WEBHOOK_SECRET` (the container will not start without it) and `CRM_WEBHOOK_
 - No live Pipedrive or Bonzo connector. Outbound is one HTTP POST of our schema.
 - No live voice provider. Simulate-call is the demo. Plug Vapi/Retell into `POST /webhooks/voice` when you have a key.
 - Meeting "booked" is a field on the payload, not a Calendar API.
-- `POST /webhooks/voice` is not signed yet. Vapi and Retell each have their own scheme; add the provider's check when one is wired.
+- `POST /webhooks/voice` uses LoanDesk's signature scheme, so a relay such as n8n can sign and forward calls. Vapi and Retell each sign with their own scheme, so calling it from one of them directly needs that provider's check added.
 - The CRM retry sweep is a timer in the API process. Run one instance, or move it to a queue before scaling out.
-- A lead that used up its retries stays `failed` in the UI. Nothing pages anyone yet.
+- A lead that used up its retries shows **gave up** in the UI. Nothing pages anyone yet.
 
 That is honest. The qualifying work is the mapping boundary, the cents type, and refusing to 200 on a bad `$450,000`.

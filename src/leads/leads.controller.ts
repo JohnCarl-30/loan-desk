@@ -14,14 +14,14 @@ export class LeadsController {
 
   @Get()
   list() {
-    return this.store.list().map((lead) => serializeLead(lead, false));
+    return this.store.list().map((lead) => serializeLead(lead, this.crm, false));
   }
 
   @Get(":id")
   one(@Param("id") id: string) {
     const lead = this.store.findById(id);
     if (!lead) throw new NotFoundException({ error: { code: "NOT_FOUND", message: "lead not found" } });
-    return serializeLead(lead, true);
+    return serializeLead(lead, this.crm, true);
   }
 
   @Post(":id/crm-retry")
@@ -29,11 +29,12 @@ export class LeadsController {
     const lead = this.store.findById(id);
     if (!lead) throw new NotFoundException({ error: { code: "NOT_FOUND", message: "lead not found" } });
     const updated = await this.crm.postLead(lead);
-    return serializeLead(updated, true);
+    return serializeLead(updated, this.crm, true);
   }
 }
 
-function serializeLead(lead: Lead, detail: boolean) {
+function serializeLead(lead: Lead, crm: CrmService, detail: boolean) {
+  const schedule = crm.retrySchedule(lead);
   const base = {
     id: lead.id,
     externalId: lead.externalId,
@@ -55,6 +56,8 @@ function serializeLead(lead: Lead, detail: boolean) {
     droppedFields: lead.droppedFields,
     crmStatus: lead.crmStatus,
     crmAttempts: lead.crmAttempts,
+    crmNextRetryAt: schedule.nextRetryAt,
+    crmGaveUp: schedule.gaveUp,
     createdAt: lead.createdAt,
     updatedAt: lead.updatedAt,
   };
